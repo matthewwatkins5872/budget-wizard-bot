@@ -134,7 +134,26 @@ async def exportexcel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bio.seek(0)
     await update.message.reply_document(InputFile(bio, "budget_wizard_expenses.xlsx"),
                                         caption="Here is your Excel export.")
+def parse_free_expense(text: str):
+    parts = text.strip().split()
+    if not parts:
+        return None
 
+    first = parts[0].replace("$", "").replace(",", "")
+    try:
+        amt = float(first)
+    except ValueError:
+        return None
+
+    tokens = parts[1:]
+    stopwords = {"for", "on", "to", "the", "a", "an", "my"}
+    while tokens and tokens[0].lower() in stopwords:
+        tokens = tokens[1:]
+
+    cat = tokens[0] if tokens else "uncategorized"
+    notes = " ".join(tokens[1:]) if len(tokens) > 1 else ""
+    return amt, cat, notes
+    
 async def unlockfull(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Unlock the full detailed report for $1:\n"
