@@ -117,9 +117,44 @@ async def unlockfull(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
-    if text == "paid":
-        await update.message.reply_text("✅ Payment noted (manual). Your full report is unlocked!")
+    user_id = update.effective_user.id
+
+    if text in ["hi", "hello", "hey"]:
+        await start(update, context)
+    elif text.startswith("add "):
+        # Format: add 12.50 groceries milk and bread
+        parts = text.split()
+        if len(parts) >= 3:
+            try:
+                amount = float(parts[1])
+                category = parts[2]
+                notes = " ".join(parts[3:]) if len(parts) > 3 else ""
+                add_expense_to_store(user_id, amount, category, notes)
+                await update.message.reply_text(f"✅ Added ${amount:.2f} to '{category}'.")
+            except ValueError:
+                await update.message.reply_text("❌ Amount must be a number. Example: add 12.50 groceries")
+        else:
+            await update.message.reply_text("Usage: add <amount> <category> [notes]")
+
+    elif text in ["view", "summary"]:
+        await viewexpenses(update, context)
+    elif text in ["generate", "budget"]:
+        await generatebudget(update, context)
+    elif text in ["export", "excel"]:
+        await exportexcel(update, context)
+    elif text in ["unlock", "buy", "pay"]:
+        await unlockfull(update, context)
+    elif text == "paid":
+        await update.message.reply_text("✅ Payment noted. Your full report is unlocked!")
     else:
+        await update.message.reply_text(
+            "I didn’t recognize that. Try:\n"
+            "- `add 12.50 groceries milk and bread`\n"
+            "- `view` to see expenses\n"
+            "- `generate` for budget\n"
+            "- `export` for Excel\n"
+            "- `unlock` to buy full report"
+        )
         await update.message.reply_text("Type /start to see available commands.")
 
 def main():
