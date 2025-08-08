@@ -9,20 +9,38 @@ TOKEN = os.getenv("BOT_TOKEN")  # Set this on Railway
 PAYPAL_LINK = os.getenv("PAYPAL_LINK", "https://paypal.me/YourName/1")  # optional
 
 # ===== Simple in-memory store (per process) =====
-# For production, replace with a database (SQLite, Postgres, etc.).
-STORE = {}  # user_id -> list of {"amount": float, "category": str, "notes": str, "ts": datetime}
-MODE = {}   # user_id -> "add" or None
+# STORE[user_id][period] = list of expense dicts
+STORE = {}
+MODE = {}                 # user_id -> "add" or None
+CURRENT_PERIOD = {}       # user_id -> "YYYY-MM"
+
+def _this_month() -> str:
+    return datetime.utcnow().strftime("%Y-%m")
+
+def _ensure_user_period(user_id: int) -> str:
+    period = CURRENT_PERIOD.get(user_id)
+    if not period:
+        period = _this_month()
+        CURRENT_PERIOD[user_id] = period
+    STORE.setdefault(user_id, {}).setdefault(period, [])
+    return period
 
 def add_expense_to_store(user_id: int, amount: float, category: str, notes: str):
-    STORE.setdefault(user_id, []).append({
+    period = _ensure_user_period(user_id)
+    STORE[user_id][period].append({
         "amount": amount,
         "category": category,
         "notes": notes,
-        "ts": datetime.utcnow()
+        "ts": datetime.utcnow(),
     })
 
-def get_expenses(user_id: int):
-    return STORE.get(user_id, [])
+def clear_current_month(user_id: int):
+    period = _ensure_user_period(user_id)
+    STORE[user_id][period] = []
+
+def get_current_month_expenses(user_id: int):
+    period = _ensure_user_period(user_id)
+    return STORE[user_id][period]
 
 # ---------- helper: parse free-text expense lines ----------
 def parse_free_expense(text: str):
@@ -36,27 +54,46 @@ def parse_free_expense(text: str):
     parts = text.strip().split()
     if not parts:
         return None
+
     first = parts[0].replace("$", "").replace(",", "")
     try:
         amt = float(first)
     except ValueError:
         return None
-    cat = parts[1] if len(parts) > 1 else "uncategorized"
-    notes = " ".join(parts[2:]) if len(parts) > 2 else ""
+
+    tokens = parts[1:]
+    stopwords = {"for", "on", "to", "the", "a", "an", "my"}
+    while tokens and tokens[0].lower() in stopwords:
+        tokens = tokens[1:]
+
+    cat = tokens[0] if tokens else "uncategorized"
+    notes = " ".join(tokens[1:]) if len(tokens) > 1 else ""
     return amt, cat, notes
 
 # ================== Command handlers ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    CURRENT_PERIOD[user_id] = _this_month()
     MODE[user_id] = "add"
+    _ensure_user_period(user_id)
     await update.message.reply_text(
         "Welcome to Budget Wizard 🧙‍♂️\n"
-        "I’m ready to record expenses. Send them like:\n"
-        "• 12.50 groceries milk and bread\n"
-        "• 20 gas\n\n"
+        "I’m ready to record **monthly** expenses. Send them like:\n"
+        "• 1200 rent\n• 60 phone\n• 230 car_insurance\n\n"
         "Type **view** for a summary, **generate** for a budget, **export** for Excel,\n"
-        "or **done** to exit add mode."
+        "or **done** to exit add mode.\n"
+        "Tip: type **reset** or **new month** to clear this month's items."
+    )
+
+async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    CURRENT_PERIOD[user_id] = _this_month()  # keep period as current month
+    clear_current_month(user_id)
+    MODE[user_id] = "add"
+    await update.message.reply_text(
+        "✅ Cleared this month's expenses. Start your **new month** now!\n"
+        "Examples:\n• 1200 rent\n• 60 phone\n• 230 car_insurance"
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -78,33 +115,35 @@ async def addexpense(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def viewexpenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    items = get_expenses(user_id)
+    items = get_current_month_expenses(user_id)
     if not items:
-        return await update.message.reply_text("No expenses yet. Add one like: 12.50 groceries milk and bread")
+        return await update.message.reply_text("No expenses yet this month. Add one like: 1200 rent")
     total = sum(x["amount"] for x in items)
     by_cat = {}
     for x in items:
         by_cat[x["category"]] = by_cat.get(x["category"], 0) + x["amount"]
-    lines = [f"📊 Total: ${total:.2f}"]
+    period = CURRENT_PERIOD.get(user_id, _this_month())
+    lines = [f"📊 {period} total: ${total:.2f}"]
     for k, v in sorted(by_cat.items(), key=lambda kv: -kv[1]):
         lines.append(f" - {k}: ${v:.2f}")
     await update.message.reply_text("\n".join(lines))
 
 async def generatebudget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    items = get_expenses(user_id)
+    items = get_current_month_expenses(user_id)
     if not items:
         return await update.message.reply_text("No data yet. Add your monthly bills one by one.")
 
     monthly_total = sum(x["amount"] for x in items)
 
-    # Optional: show per-category monthly totals
+    # per-category monthly totals
     by_cat = {}
     for x in items:
         by_cat[x["category"]] = by_cat.get(x["category"], 0) + x["amount"]
 
+    period = CURRENT_PERIOD.get(user_id, _this_month())
     lines = [
-        "📅 Monthly budget snapshot:",
+        f"📅 Monthly budget snapshot ({period}):",
         f"- Monthly total: ${monthly_total:.2f}",
         "",
         "By category:"
@@ -112,48 +151,31 @@ async def generatebudget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for k, v in sorted(by_cat.items(), key=lambda kv: -kv[1]):
         lines.append(f"• {k}: ${v:.2f}")
 
-    lines.append("\nType **export** to download Excel.")
+    lines.append("\nType **export** to download Excel, or **reset** to start a new month.")
     await update.message.reply_text("\n".join(lines))
+
 async def exportexcel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         from openpyxl import Workbook
     except Exception as e:
         return await update.message.reply_text(f"openpyxl missing: {e}")
     user_id = update.effective_user.id
-    items = get_expenses(user_id)
+    items = get_current_month_expenses(user_id)
     if not items:
         return await update.message.reply_text("No expenses yet to export.")
     wb = Workbook()
     ws = wb.active
     ws.title = "Expenses"
-    ws.append(["Timestamp (UTC)", "Amount", "Category", "Notes"])
+    ws.append(["Period", "Timestamp (UTC)", "Amount", "Category", "Notes"])
+    period = CURRENT_PERIOD.get(user_id, _this_month())
     for x in items:
-        ws.append([x["ts"].strftime("%Y-%m-%d %H:%M:%S"), float(x["amount"]), x["category"], x["notes"]])
+        ws.append([period, x["ts"].strftime("%Y-%m-%d %H:%M:%S"), float(x["amount"]), x["category"], x["notes"]])
     bio = io.BytesIO()
     wb.save(bio)
     bio.seek(0)
     await update.message.reply_document(InputFile(bio, "budget_wizard_expenses.xlsx"),
                                         caption="Here is your Excel export.")
-def parse_free_expense(text: str):
-    parts = text.strip().split()
-    if not parts:
-        return None
 
-    first = parts[0].replace("$", "").replace(",", "")
-    try:
-        amt = float(first)
-    except ValueError:
-        return None
-
-    tokens = parts[1:]
-    stopwords = {"for", "on", "to", "the", "a", "an", "my"}
-    while tokens and tokens[0].lower() in stopwords:
-        tokens = tokens[1:]
-
-    cat = tokens[0] if tokens else "uncategorized"
-    notes = " ".join(tokens[1:]) if len(tokens) > 1 else ""
-    return amt, cat, notes
-    
 async def unlockfull(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Unlock the full detailed report for $1:\n"
@@ -164,39 +186,54 @@ async def unlockfull(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================== Conversational fallback ==================
 
 async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip().lower()
+    text = (update.message.text or "").strip()
     user_id = update.effective_user.id
 
-    # Enter add mode with greetings
-    if text in ["hi", "hello", "hey", "start", "go"]:
+    # normalize
+    low = text.lower()
+
+    # Start a fresh month (no slash)
+    if low in ["reset", "clear", "new month", "start new month"]:
+        CURRENT_PERIOD[user_id] = _this_month()
+        clear_current_month(user_id)
         MODE[user_id] = "add"
         return await update.message.reply_text(
-            "Great! Send expenses like: 12.50 groceries notes\n"
+            "✅ New month started. Add expenses like `1200 rent`, `60 phone`.\n"
+            "Type **view** or **generate** anytime."
+        )
+
+    # Enter add mode with greetings
+    if low in ["hi", "hello", "hey", "start", "go"]:
+        CURRENT_PERIOD[user_id] = _this_month()
+        MODE[user_id] = "add"
+        _ensure_user_period(user_id)
+        return await update.message.reply_text(
+            "Great! Send expenses like: 1200 rent\n"
             "Say **done** when finished.\n"
             "Shortcuts: **view**, **generate**, **export**, **unlock**."
         )
 
     # Exit add mode
-    if text in ["done", "stop", "finish"]:
+    if low in ["done", "stop", "finish"]:
         MODE[user_id] = None
         return await update.message.reply_text(
             "Okay. You can type **view**, **generate**, or **export** anytime."
         )
 
     # Keyword shortcuts (no slash)
-    if text in ["view", "summary"]:
+    if low in ["view", "summary"]:
         return await viewexpenses(update, context)
-    if text in ["generate", "budget"]:
+    if low in ["generate", "budget"]:
         return await generatebudget(update, context)
-    if text in ["export", "excel"]:
+    if low in ["export", "excel"]:
         return await exportexcel(update, context)
-    if text in ["unlock", "buy", "pay"]:
+    if low in ["unlock", "buy", "pay"]:
         return await unlockfull(update, context)
-    if text == "paid":
+    if low == "paid":
         return await update.message.reply_text("✅ Payment noted. Your full report is unlocked!")
 
     # Add via "add ..." command
-    if text.startswith("add "):
+    if low.startswith("add "):
         parsed = parse_free_expense(text[4:])
         if not parsed:
             return await update.message.reply_text("Usage: add <amount> <category> [notes]")
@@ -204,21 +241,21 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_expense_to_store(user_id, amt, cat, notes)
         return await update.message.reply_text(f"✅ Added ${amt:.2f} to '{cat}'. Next expense?")
 
-    # Add-mode: bare expense lines (e.g., "12 pizza", "20 gas")
+    # Add-mode: bare expense lines (e.g., "1200 rent", "60 phone")
     if MODE.get(user_id) == "add":
-        parsed = parse_free_expense(update.message.text)
+        parsed = parse_free_expense(text)
         if parsed:
             amt, cat, notes = parsed
             add_expense_to_store(user_id, amt, cat, notes)
             return await update.message.reply_text("✅ Added. Next expense or type **done**.")
         return await update.message.reply_text(
-            "Send an expense like `12.50 groceries lunch` or type **done**.\n"
+            "Send an expense like `1200 rent` or type **done**.\n"
             "Shortcuts: **view**, **generate**, **export**."
         )
 
     # Fallback help
     return await update.message.reply_text(
-        "Try: **hi** to start adding, `add 12 coffee`, **view**, **generate**, **export**, or **unlock**."
+        "Try: **hi** to start adding, `add 1200 rent`, **view**, **generate**, **export**, or **unlock**."
     )
 
 # ================== App bootstrap ==================
@@ -227,14 +264,17 @@ def main():
     if not TOKEN:
         raise SystemExit("BOT_TOKEN is not set.")
     app = Application.builder().token(TOKEN).build()
+
     # Slash commands (still supported)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("reset", reset_cmd))          # <-- added
     app.add_handler(CommandHandler("addexpense", addexpense))
     app.add_handler(CommandHandler("viewexpenses", viewexpenses))
     app.add_handler(CommandHandler("generatebudget", generatebudget))
     app.add_handler(CommandHandler("exportexcel", exportexcel))
     app.add_handler(CommandHandler("unlockfull", unlockfull))
+
     # Natural text handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
