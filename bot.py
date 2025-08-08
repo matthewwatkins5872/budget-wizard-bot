@@ -88,17 +88,22 @@ def parse_free_expense(text: str):
 
 def parse_expense_block(text: str):
     """
-    Split multi-line input into expense rows.
-    Returns (items, errors):
-      items = [(amount, category, notes), ...]
-      errors = ["line that failed", ...]
+    Accept multiple expenses separated by newlines OR slashes.
+    Examples:
+      1200 rent
+      500 food
+      200 insurance
+    or:
+      1200 rent / 500 food / 200 insurance
     """
+    if ("\n" not in text) and ("/" in text):
+        lines = [p.strip() for p in text.split("/") if p.strip()]
+    else:
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
     items, errors = [], []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        parsed = parse_free_expense(line)
+    for raw in lines:
+        parsed = parse_free_expense(raw)
         if parsed:
             items.append(parsed)
         else:
@@ -115,7 +120,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Welcome to Budget Wizard 🧙‍♂️\n"
         "Enter **monthly** expenses like:\n"
         "• 1200 rent\n• 60 phone\n• 230 car_insurance\n\n"
-        "Paste multiple lines at once — I’ll add them all.\n"
+        "Paste multiple lines or use slashes: 1200 rent / 500 food / 200 insurance\n"
         "Shortcuts: **view**, **generate**, **export**, **unlock**, **done**.\n"
         "Type **reset** to start a new month."
     )
@@ -146,13 +151,16 @@ async def addexpense(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def addmany(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /addmany\n1200 rent\n500 groceries\n200 gas truck
+    or:
+    /addmany  (then paste lines in the same message)
     """
     text = update.message.text
     block = text.split("\n", 1)[1] if "\n" in text else ""
     if not block.strip():
         return await update.message.reply_text(
             "Paste multiple lines after the command, e.g.:\n"
-            "/addmany\n1200 rent\n500 groceries\n200 gas"
+            "/addmany\n1200 rent\n500 groceries\n200 gas\n\n"
+            "You can also separate with slashes: 1200 rent / 500 food / 200 insurance"
         )
     user_id = update.effective_user.id
     items, errors = parse_expense_block(block)
@@ -166,34 +174,40 @@ async def addmany(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 async def viewexpenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    items = get_current_month_expenses(user_id)
-    if not items:
-        return await update.message.reply_text("No expenses yet.")
-    total = sum(x["amount"] for x in items)
-    by_cat = {}
-    for x in items:
-        by_cat[x["category"]] = by_cat.get(x["category"], 0) + x["amount"]
-    period = CURRENT_PERIOD[user_id]
-    lines = [f"📊 {period} total: ${total:.2f}"]
-    for k, v in sorted(by_cat.items(), key=lambda kv: -kv[1]):
-        lines.append(f"- {k}: ${v:.2f}")
-    await update.message.reply_text("\n".join(lines))
+    try:
+        user_id = update.effective_user.id
+        items = get_current_month_expenses(user_id)
+        if not items:
+            return await update.message.reply_text("No expenses yet.")
+        total = sum(x["amount"] for x in items)
+        by_cat = {}
+        for x in items:
+            by_cat[x["category"]] = by_cat.get(x["category"], 0) + x["amount"]
+        period = CURRENT_PERIOD[user_id]
+        lines = [f"📊 {period} total: ${total:.2f}"]
+        for k, v in sorted(by_cat.items(), key=lambda kv: -kv[1]):
+            lines.append(f"- {k}: ${v:.2f}")
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"❌ view error: {e}")
 
 async def generatebudget(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    items = get_current_month_expenses(user_id)
-    if not items:
-        return await update.message.reply_text("No data yet.")
-    monthly_total = sum(x["amount"] for x in items)
-    by_cat = {}
-    for x in items:
-        by_cat[x["category"]] = by_cat.get(x["category"], 0) + x["amount"]
-    period = CURRENT_PERIOD[user_id]
-    lines = [f"📅 Budget ({period}):", f"Total: ${monthly_total:.2f}", ""]
-    for k, v in sorted(by_cat.items(), key=lambda kv: -kv[1]):
-        lines.append(f"• {k}: ${v:.2f}")
-    await update.message.reply_text("\n".join(lines))
+    try:
+        user_id = update.effective_user.id
+        items = get_current_month_expenses(user_id)
+        if not items:
+            return await update.message.reply_text("No data yet.")
+        monthly_total = sum(x["amount"] for x in items)
+        by_cat = {}
+        for x in items:
+            by_cat[x["category"]] = by_cat.get(x["category"], 0) + x["amount"]
+        period = CURRENT_PERIOD[user_id]
+        lines = [f"📅 Budget ({period}):", f"Total: ${monthly_total:.2f}", ""]
+        for k, v in sorted(by_cat.items(), key=lambda kv: -kv[1]):
+            lines.append(f"• {k}: ${v:.2f}")
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"❌ generate error: {e}")
 
 # =============== Stripe Checkout ===============
 async def unlockfull(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -227,39 +241,38 @@ async def exportexcel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font
+        user_id = update.effective_user.id
+        items = get_current_month_expenses(user_id)
+        if not items:
+            return await update.message.reply_text("No expenses yet.")
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Expenses"
+        ws.append(["Period", "Timestamp", "Amount", "Category", "Notes"])
+
+        if _is_unlocked(user_id):
+            for x in items:
+                ws.append([CURRENT_PERIOD[user_id], x["ts"].strftime("%Y-%m-%d %H:%M:%S"),
+                           float(x["amount"]), x["category"], x["notes"]])
+            fname, caption = "budget_full.xlsx", "✅ Full export unlocked."
+        else:
+            n = max(1, len(items)//2)
+            for x in items[:n]:
+                ws.append([CURRENT_PERIOD[user_id], x["ts"].strftime("%Y-%m-%d %H:%M:%S"),
+                           float(x["amount"]), x["category"], x["notes"]])
+            ws.insert_rows(1)
+            ws["A1"] = "SAMPLE — Unlock full for $1 via /unlock"
+            ws.merge_cells("A1:E1")
+            ws["A1"].font = Font(bold=True)
+            fname, caption = "budget_sample.xlsx", "This is a SAMPLE. Use /unlock to get the full report."
+
+        bio = io.BytesIO()
+        wb.save(bio)
+        bio.seek(0)
+        await update.message.reply_document(InputFile(bio, fname), caption=caption)
     except Exception as e:
-        return await update.message.reply_text(f"openpyxl missing: {e}")
-
-    user_id = update.effective_user.id
-    items = get_current_month_expenses(user_id)
-    if not items:
-        return await update.message.reply_text("No expenses yet.")
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Expenses"
-    ws.append(["Period", "Timestamp", "Amount", "Category", "Notes"])
-
-    if _is_unlocked(user_id):
-        for x in items:
-            ws.append([CURRENT_PERIOD[user_id], x["ts"].strftime("%Y-%m-%d %H:%M:%S"),
-                       float(x["amount"]), x["category"], x["notes"]])
-        fname, caption = "budget_full.xlsx", "✅ Full export unlocked."
-    else:
-        n = max(1, len(items)//2)
-        for x in items[:n]:
-            ws.append([CURRENT_PERIOD[user_id], x["ts"].strftime("%Y-%m-%d %H:%M:%S"),
-                       float(x["amount"]), x["category"], x["notes"]])
-        ws.insert_rows(1)
-        ws["A1"] = "SAMPLE — Unlock full for $1 via /unlock"
-        ws.merge_cells("A1:E1")
-        ws["A1"].font = Font(bold=True)
-        fname, caption = "budget_sample.xlsx", "This is a SAMPLE. Use /unlock to get the full report."
-
-    bio = io.BytesIO()
-    wb.save(bio)
-    bio.seek(0)
-    await update.message.reply_document(InputFile(bio, fname), caption=caption)
+        await update.message.reply_text(f"❌ export error: {e}")
 
 # =============== Fallback Text ===============
 async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -281,11 +294,11 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in ["unlock", "buy", "pay"]:
         return await unlockfull(update, context)
 
-    # "add ..." with block support
+    # "add ..." with block support (slashes or newlines)
     if text.startswith("add "):
-        content = text_raw[4:]
-        if "\n" in content.strip():
-            items, errors = parse_expense_block(content)
+        content = update.message.text[4:]
+        items, errors = parse_expense_block(content)
+        if items:
             for amt, cat, notes in items:
                 add_expense_to_store(user_id, amt, cat, notes)
             msg = f"✅ Added {len(items)} item(s)."
@@ -294,18 +307,13 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if len(errors) > 5:
                     msg += f"\n(and {len(errors)-5} more...)"
             return await update.message.reply_text(msg)
-        parsed = parse_free_expense(content)
-        if parsed:
-            amt, cat, notes = parsed
-            add_expense_to_store(user_id, amt, cat, notes)
-            return await update.message.reply_text("✅ Added. Next expense or type **done**.")
-        return await update.message.reply_text("Usage: add <amount> <category> [notes]")
+        return await update.message.reply_text("Usage:\nadd 1200 rent / 500 food / 200 insurance")
 
-    # Add-mode: handle multi-line paste or single line
+    # Add-mode: handle multi-line and/or slashes in one go
     if MODE.get(user_id) == "add":
         block = text_raw.strip()
-        if "\n" in block:
-            items, errors = parse_expense_block(block)
+        items, errors = parse_expense_block(block)
+        if items:
             for amt, cat, notes in items:
                 add_expense_to_store(user_id, amt, cat, notes)
             msg = f"✅ Added {len(items)} item(s)."
@@ -315,14 +323,10 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg += f"\n(and {len(errors)-5} more...)"
             return await update.message.reply_text(msg)
 
-        parsed = parse_free_expense(text_raw)
-        if parsed:
-            amt, cat, notes = parsed
-            add_expense_to_store(user_id, amt, cat, notes)
-            return await update.message.reply_text("✅ Added. Next expense or type **done**.")
         return await update.message.reply_text(
-            "Send an expense like `1200 rent` or paste multiple lines.\n"
-            "Shortcuts: **view**, **generate**, **export**, **unlock**."
+            "Send expenses like:\n"
+            "• 1200 rent\n• 500 food\n• 200 insurance\n"
+            "or in one line: 1200 rent / 500 food / 200 insurance"
         )
 
     if text in ["done", "stop", "finish"]:
@@ -330,7 +334,7 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Okay. You can type **view**, **generate**, or **export** anytime.")
 
     return await update.message.reply_text(
-        "Try: **hi** to start, `add 1200 rent`, paste multiple lines, **view**, **generate**, **export**, **unlock**."
+        "Try: **hi** to start, `add 1200 rent`, paste multiple lines or use slashes, **view**, **generate**, **export**, **unlock**."
     )
 
 # =============== Flask (Stripe Webhook) ===============
