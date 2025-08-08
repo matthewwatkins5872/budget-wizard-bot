@@ -1,4 +1,3 @@
-
 import os
 import io
 from datetime import datetime
@@ -12,6 +11,7 @@ PAYPAL_LINK = os.getenv("PAYPAL_LINK", "https://paypal.me/YourName/1")  # option
 # ===== Simple in-memory store (per process) =====
 # For production, replace with a database (SQLite, Postgres, etc.).
 STORE = {}  # user_id -> list of {"amount": float, "category": str, "notes": str, "ts": datetime}
+MODE = {}   # user_id -> "add" or None   <-- conversational "add mode"
 
 def add_expense_to_store(user_id: int, amount: float, category: str, notes: str):
     STORE.setdefault(user_id, []).append({
@@ -24,26 +24,47 @@ def add_expense_to_store(user_id: int, amount: float, category: str, notes: str)
 def get_expenses(user_id: int):
     return STORE.get(user_id, [])
 
-# ===== Command handlers =====
+# ---------- helper: parse free-text expense lines ----------
+def parse_free_expense(text: str):
+    """
+    Accepts lines like:
+      "12.50 groceries milk and bread"
+      "$20 gas"
+      "15 lunch burger"
+    Returns (amount, category, notes) or None if not parseable.
+    """
+    parts = text.strip().split()
+    if not parts:
+        return None
+    first = parts[0].replace("$", "").replace(",", "")
+    try:
+        amt = float(first)
+    except ValueError:
+        return None
+    cat = parts[1] if len(parts) > 1 else "uncategorized"
+    notes = " ".join(parts[2:]) if len(parts) > 2 else ""
+    return amt, cat, notes
+
+# ================== Command handlers ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "Welcome to Budget Wizard 🧙‍♂️\n\n"
-        "Commands:\n"
-        "/addexpense <amount> <category> [notes]\n"
-        "  e.g. /addexpense 12.50 groceries milk and bread\n"
-        "/viewexpenses - Summary of your expenses\n"
-        "/generatebudget - Simple budget snapshot\n"
-        "/exportexcel - Download your expenses as an Excel file\n"
-        "/unlockfull - Pay $1 to unlock detailed reports\n"
-        "/help - Show this menu again"
+    # Drop user into add mode immediately
+    user_id = update.effective_user.id
+    MODE[user_id] = "add"
+    await update.message.reply_text(
+        "Welcome to Budget Wizard 🧙‍♂️\n"
+        "I’m ready to record expenses. Send them like:\n"
+        "• 12.50 groceries milk and bread\n"
+        "• 20 gas\n\n"
+        "Type **view** for a summary, **generate** for a budget, **export** for Excel,\n"
+        "or **done** to exit add mode."
     )
-    await update.message.reply_text(msg)
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
 async def addexpense(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Slash-command version (still supported)
     if not context.args or len(context.args) < 2:
         return await update.message.reply_text("Usage: /addexpense <amount> <category> [notes]")
     try:
@@ -54,13 +75,13 @@ async def addexpense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     notes = " ".join(context.args[2:]) if len(context.args) > 2 else ""
     user_id = update.effective_user.id
     add_expense_to_store(user_id, amount, category, notes)
-    await update.message.reply_text(f"✅ Added ${amount:.2f} to '{category}'. Use /viewexpenses to see totals.")
+    await update.message.reply_text(f"✅ Added ${amount:.2f} to '{category}'. Use /viewexpenses or type 'view'.")
 
 async def viewexpenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     items = get_expenses(user_id)
     if not items:
-        return await update.message.reply_text("No expenses yet. Add one with /addexpense 12.50 groceries")
+        return await update.message.reply_text("No expenses yet. Add one like: 12.50 groceries milk and bread")
     total = sum(x["amount"] for x in items)
     by_cat = {}
     for x in items:
@@ -74,9 +95,8 @@ async def generatebudget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     items = get_expenses(user_id)
     if not items:
-        return await update.message.reply_text("No data yet. Add expenses with /addexpense.")
+        return await update.message.reply_text("No data yet. Add expenses first.")
     total = sum(x["amount"] for x in items)
-    # A tiny demo "budget": recommend spending <= 70% of average daily spend
     days = max((datetime.utcnow() - min(x["ts"] for x in items)).days + 1, 1)
     avg_daily = total / days
     rec_daily = avg_daily * 0.7
@@ -84,7 +104,7 @@ async def generatebudget(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🧮 Budget snapshot:\n"
         f"- Avg daily spend: ${avg_daily:.2f}\n"
         f"- Suggested cap: ${rec_daily:.2f}/day\n"
-        f"Use /exportexcel to download your data."
+        f"Type **export** to download Excel."
     )
 
 async def exportexcel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,8 +125,8 @@ async def exportexcel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bio = io.BytesIO()
     wb.save(bio)
     bio.seek(0)
-    filename = "budget_wizard_expenses.xlsx"
-    await update.message.reply_document(InputFile(bio, filename), caption="Here is your Excel export.")
+    await update.message.reply_document(InputFile(bio, "budget_wizard_expenses.xlsx"),
+                                        caption="Here is your Excel export.")
 
 async def unlockfull(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -114,6 +134,8 @@ async def unlockfull(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{PAYPAL_LINK}\n\n"
         "After payment, reply 'paid' and I'll unlock your report (demo)."
     )
+
+# ================== Conversational fallback ==================
 
 async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
@@ -173,10 +195,13 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Try: **hi** to start adding, `add 12 coffee`, **view**, **generate**, **export**, or **unlock**."
     )
 
+# ================== App bootstrap ==================
+
 def main():
     if not TOKEN:
         raise SystemExit("BOT_TOKEN is not set.")
     app = Application.builder().token(TOKEN).build()
+    # Slash commands (still supported)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("addexpense", addexpense))
@@ -184,6 +209,7 @@ def main():
     app.add_handler(CommandHandler("generatebudget", generatebudget))
     app.add_handler(CommandHandler("exportexcel", exportexcel))
     app.add_handler(CommandHandler("unlockfull", unlockfull))
+    # Natural text handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
