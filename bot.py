@@ -119,43 +119,59 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
     user_id = update.effective_user.id
 
-    if text in ["hi", "hello", "hey"]:
-        await start(update, context)
-    elif text.startswith("add "):
-        # Format: add 12.50 groceries milk and bread
-        parts = text.split()
-        if len(parts) >= 3:
-            try:
-                amount = float(parts[1])
-                category = parts[2]
-                notes = " ".join(parts[3:]) if len(parts) > 3 else ""
-                add_expense_to_store(user_id, amount, category, notes)
-                await update.message.reply_text(f"✅ Added ${amount:.2f} to '{category}'.")
-            except ValueError:
-                await update.message.reply_text("❌ Amount must be a number. Example: add 12.50 groceries")
-        else:
-            await update.message.reply_text("Usage: add <amount> <category> [notes]")
-
-    elif text in ["view", "summary"]:
-        await viewexpenses(update, context)
-    elif text in ["generate", "budget"]:
-        await generatebudget(update, context)
-    elif text in ["export", "excel"]:
-        await exportexcel(update, context)
-    elif text in ["unlock", "buy", "pay"]:
-        await unlockfull(update, context)
-    elif text == "paid":
-        await update.message.reply_text("✅ Payment noted. Your full report is unlocked!")
-    else:
-        await update.message.reply_text(
-            "I didn’t recognize that. Try:\n"
-            "- `add 12.50 groceries milk and bread`\n"
-            "- `view` to see expenses\n"
-            "- `generate` for budget\n"
-            "- `export` for Excel\n"
-            "- `unlock` to buy full report"
+    # Enter add mode with greetings
+    if text in ["hi", "hello", "hey", "start", "go"]:
+        MODE[user_id] = "add"
+        return await update.message.reply_text(
+            "Great! Send expenses like: 12.50 groceries notes\n"
+            "Say **done** when finished.\n"
+            "Shortcuts: **view**, **generate**, **export**, **unlock**."
         )
-        await update.message.reply_text("Type /start to see available commands.")
+
+    # Exit add mode
+    if text in ["done", "stop", "finish"]:
+        MODE[user_id] = None
+        return await update.message.reply_text(
+            "Okay. You can type **view**, **generate**, or **export** anytime."
+        )
+
+    # Keyword shortcuts (no slash)
+    if text in ["view", "summary"]:
+        return await viewexpenses(update, context)
+    if text in ["generate", "budget"]:
+        return await generatebudget(update, context)
+    if text in ["export", "excel"]:
+        return await exportexcel(update, context)
+    if text in ["unlock", "buy", "pay"]:
+        return await unlockfull(update, context)
+    if text == "paid":
+        return await update.message.reply_text("✅ Payment noted. Your full report is unlocked!")
+
+    # Add via "add ..." command
+    if text.startswith("add "):
+        parsed = parse_free_expense(text[4:])
+        if not parsed:
+            return await update.message.reply_text("Usage: add <amount> <category> [notes]")
+        amt, cat, notes = parsed
+        add_expense_to_store(user_id, amt, cat, notes)
+        return await update.message.reply_text(f"✅ Added ${amt:.2f} to '{cat}'. Next expense?")
+
+    # Add-mode: bare expense lines (e.g., "12 pizza", "20 gas")
+    if MODE.get(user_id) == "add":
+        parsed = parse_free_expense(update.message.text)
+        if parsed:
+            amt, cat, notes = parsed
+            add_expense_to_store(user_id, amt, cat, notes)
+            return await update.message.reply_text("✅ Added. Next expense or type **done**.")
+        return await update.message.reply_text(
+            "Send an expense like `12.50 groceries lunch` or type **done**.\n"
+            "Shortcuts: **view**, **generate**, **export**."
+        )
+
+    # Fallback help
+    return await update.message.reply_text(
+        "Try: **hi** to start adding, `add 12 coffee`, **view**, **generate**, **export**, or **unlock**."
+    )
 
 def main():
     if not TOKEN:
