@@ -48,7 +48,6 @@ def parse_free_expense(text: str):
 # ================== Command handlers ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Drop user into add mode immediately
     user_id = update.effective_user.id
     MODE[user_id] = "add"
     await update.message.reply_text(
@@ -58,11 +57,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 20 gas\n\n"
         "Type **view** for a summary, **generate** for a budget, **export** for Excel,\n"
         "or **done** to exit add mode."
-    )
-
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
-
+)
 async def addexpense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Slash-command version (still supported)
     if not context.args or len(context.args) < 2:
