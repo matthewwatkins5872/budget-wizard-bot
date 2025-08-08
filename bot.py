@@ -11,7 +11,7 @@ PAYPAL_LINK = os.getenv("PAYPAL_LINK", "https://paypal.me/YourName/1")  # option
 # ===== Simple in-memory store (per process) =====
 # For production, replace with a database (SQLite, Postgres, etc.).
 STORE = {}  # user_id -> list of {"amount": float, "category": str, "notes": str, "ts": datetime}
-MODE = {}  # user_id -> "add" or None
+MODE = {}   # user_id -> "add" or None
 
 def add_expense_to_store(user_id: int, amount: float, category: str, notes: str):
     STORE.setdefault(user_id, []).append({
@@ -57,9 +57,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 20 gas\n\n"
         "Type **view** for a summary, **generate** for a budget, **export** for Excel,\n"
         "or **done** to exit add mode."
+    )
+
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
-)
+
 async def addexpense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Slash-command version (still supported)
     if not context.args or len(context.args) < 2:
