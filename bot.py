@@ -94,18 +94,26 @@ async def generatebudget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     items = get_expenses(user_id)
     if not items:
-        return await update.message.reply_text("No data yet. Add expenses first.")
-    total = sum(x["amount"] for x in items)
-    days = max((datetime.utcnow() - min(x["ts"] for x in items)).days + 1, 1)
-    avg_daily = total / days
-    rec_daily = avg_daily * 0.7
-    await update.message.reply_text(
-        f"🧮 Budget snapshot:\n"
-        f"- Avg daily spend: ${avg_daily:.2f}\n"
-        f"- Suggested cap: ${rec_daily:.2f}/day\n"
-        f"Type **export** to download Excel."
-    )
+        return await update.message.reply_text("No data yet. Add your monthly bills one by one.")
 
+    monthly_total = sum(x["amount"] for x in items)
+
+    # Optional: show per-category monthly totals
+    by_cat = {}
+    for x in items:
+        by_cat[x["category"]] = by_cat.get(x["category"], 0) + x["amount"]
+
+    lines = [
+        "📅 Monthly budget snapshot:",
+        f"- Monthly total: ${monthly_total:.2f}",
+        "",
+        "By category:"
+    ]
+    for k, v in sorted(by_cat.items(), key=lambda kv: -kv[1]):
+        lines.append(f"• {k}: ${v:.2f}")
+
+    lines.append("\nType **export** to download Excel.")
+    await update.message.reply_text("\n".join(lines))
 async def exportexcel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         from openpyxl import Workbook
