@@ -11,7 +11,7 @@ PAYPAL_LINK = os.getenv("PAYPAL_LINK", "https://paypal.me/YourName/1")  # option
 # ===== Simple in-memory store (per process) =====
 # For production, replace with a database (SQLite, Postgres, etc.).
 STORE = {}  # user_id -> list of {"amount": float, "category": str, "notes": str, "ts": datetime}
-MODE = {}   # user_id -> "add" or None   <-- conversational "add mode"
+MODE = {}  # user_id -> "add" or None
 
 def add_expense_to_store(user_id: int, amount: float, category: str, notes: str):
     STORE.setdefault(user_id, []).append({
