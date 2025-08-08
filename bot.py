@@ -1,31 +1,18 @@
 import os
 import io
-import json
-import threading
 from datetime import datetime
 
-from flask import Flask, request, jsonify
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-import stripe
-
 # =============== Config ===============
 TOKEN = os.getenv("BOT_TOKEN")
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://example.com")
-
-STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY")
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-
-stripe.api_key = STRIPE_SECRET_KEY
 
 # =============== App State ===============
 # STORE[user_id][period] = [ {amount, category, notes, ts}, ... ]
 STORE = {}
 MODE = {}                 # user_id -> "add" or None
 CURRENT_PERIOD = {}       # user_id -> "YYYY-MM"
-UNLOCKED = {}             # UNLOCKED[user_id] = set({"YYYY-MM", ...})
 
 def _this_month() -> str:
     return datetime.utcnow().strftime("%Y-%m")
@@ -54,13 +41,6 @@ def clear_current_month(user_id: int):
 def get_current_month_expenses(user_id: int):
     period = _ensure_user_period(user_id)
     return STORE[user_id][period]
-
-def _is_unlocked(user_id: int) -> bool:
-    period = CURRENT_PERIOD.get(user_id, _this_month())
-    return period in UNLOCKED.get(user_id, set())
-
-def _mark_unlocked(user_id: int, period: str):
-    UNLOCKED.setdefault(user_id, set()).add(period)
 
 # =============== Parsing helpers ===============
 def parse_free_expense(text: str):
@@ -121,7 +101,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Enter **monthly** expenses like:\n"
         "• 1200 rent\n• 60 phone\n• 230 car_insurance\n\n"
         "Paste multiple lines or use slashes: 1200 rent / 500 food / 200 insurance\n"
-        "Shortcuts: **view**, **generate**, **export**, **unlock**, **done**.\n"
+        "Shortcuts: **view**, **generate**, **export**, **done**.\n"
         "Type **reset** to start a new month."
     )
 
@@ -151,8 +131,7 @@ async def addexpense(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def addmany(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /addmany\n1200 rent\n500 groceries\n200 gas truck
-    or:
-    /addmany  (then paste lines in the same message)
+    or slashes in one line.
     """
     text = update.message.text
     block = text.split("\n", 1)[1] if "\n" in text else ""
@@ -209,38 +188,9 @@ async def generatebudget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ generate error: {e}")
 
-# =============== Stripe Checkout ===============
-async def unlockfull(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Create a $1 Stripe Checkout session and send the link."""
-    user_id = update.effective_user.id
-    period = CURRENT_PERIOD.get(user_id, _this_month())
-    try:
-        session = stripe.checkout.Session.create(
-            mode="payment",
-            success_url=f"{PUBLIC_BASE_URL}/stripe/success?u={user_id}&p={period}",
-            cancel_url=f"{PUBLIC_BASE_URL}/stripe/cancel",
-            line_items=[{
-                "price_data": {
-                    "currency": "usd",
-                    "product_data": {"name": f"Budget Wizard unlock for {period}"},
-                    "unit_amount": 100,  # $1.00 in cents
-                },
-                "quantity": 1
-            }],
-            metadata={"user_id": str(user_id), "period": period},
-        )
-        await update.message.reply_text(
-            "Unlock the full report for **$1** via Stripe:\n"
-            f"{session.url}\n\n"
-            "After payment, I’ll unlock automatically."
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Could not create payment link: {e}")
-
 async def exportexcel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         from openpyxl import Workbook
-        from openpyxl.styles import Font
         user_id = update.effective_user.id
         items = get_current_month_expenses(user_id)
         if not items:
@@ -249,28 +199,17 @@ async def exportexcel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wb = Workbook()
         ws = wb.active
         ws.title = "Expenses"
-        ws.append(["Period", "Timestamp", "Amount", "Category", "Notes"])
-
-        if _is_unlocked(user_id):
-            for x in items:
-                ws.append([CURRENT_PERIOD[user_id], x["ts"].strftime("%Y-%m-%d %H:%M:%S"),
-                           float(x["amount"]), x["category"], x["notes"]])
-            fname, caption = "budget_full.xlsx", "✅ Full export unlocked."
-        else:
-            n = max(1, len(items)//2)
-            for x in items[:n]:
-                ws.append([CURRENT_PERIOD[user_id], x["ts"].strftime("%Y-%m-%d %H:%M:%S"),
-                           float(x["amount"]), x["category"], x["notes"]])
-            ws.insert_rows(1)
-            ws["A1"] = "SAMPLE — Unlock full for $1 via /unlock"
-            ws.merge_cells("A1:E1")
-            ws["A1"].font = Font(bold=True)
-            fname, caption = "budget_sample.xlsx", "This is a SAMPLE. Use /unlock to get the full report."
+        ws.append(["Period", "Timestamp (UTC)", "Amount", "Category", "Notes"])
+        period = CURRENT_PERIOD[user_id]
+        for x in items:
+            ws.append([period, x["ts"].strftime("%Y-%m-%d %H:%M:%S"),
+                       float(x["amount"]), x["category"], x["notes"]])
 
         bio = io.BytesIO()
         wb.save(bio)
         bio.seek(0)
-        await update.message.reply_document(InputFile(bio, fname), caption=caption)
+        await update.message.reply_document(InputFile(bio, "budget_full.xlsx"),
+                                            caption="✅ Full export (free).")
     except Exception as e:
         await update.message.reply_text(f"❌ export error: {e}")
 
@@ -291,12 +230,10 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await generatebudget(update, context)
     if text in ["export", "excel"]:
         return await exportexcel(update, context)
-    if text in ["unlock", "buy", "pay"]:
-        return await unlockfull(update, context)
 
     # "add ..." with block support (slashes or newlines)
     if text.startswith("add "):
-        content = update.message.text[4:]
+        content = text_raw[4:]
         items, errors = parse_expense_block(content)
         if items:
             for amt, cat, notes in items:
@@ -334,60 +271,13 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Okay. You can type **view**, **generate**, or **export** anytime.")
 
     return await update.message.reply_text(
-        "Try: **hi** to start, `add 1200 rent`, paste multiple lines or use slashes, **view**, **generate**, **export**, **unlock**."
+        "Try: **hi** to start, `add 1200 rent`, paste multiple lines or use slashes, **view**, **generate**, **export**."
     )
-
-# =============== Flask (Stripe Webhook) ===============
-flask_app = Flask(__name__)
-
-@flask_app.route("/stripe/webhook", methods=["POST"])
-def stripe_webhook():
-    payload = request.data
-    sig_header = request.headers.get("Stripe-Signature", "")
-    try:
-        event = stripe.Webhook.construct_event(
-            payload=payload, sig_header=sig_header, secret=STRIPE_WEBHOOK_SECRET
-        )
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"signature_error: {e}"}), 400
-
-    if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
-        if session.get("payment_status") == "paid":
-            meta = session.get("metadata") or {}
-            uid = meta.get("user_id")
-            period = meta.get("period")
-            if uid and period:
-                try:
-                    uid_int = int(uid)
-                    _mark_unlocked(uid_int, period)
-                    CURRENT_PERIOD[uid_int] = period
-                    print(f"✅ Stripe verified & unlocked — user {uid_int}, period {period}")
-                except ValueError:
-                    pass
-    return jsonify({"ok": True})
-
-@flask_app.route("/stripe/success")
-def stripe_success():
-    return "Payment received! Return to Telegram and type 'export' to download your full report."
-
-@flask_app.route("/stripe/cancel")
-def stripe_cancel():
-    return "Payment canceled."
-
-def _run_flask():
-    port = int(os.getenv("PORT", "8080"))
-    flask_app.run(host="0.0.0.0", port=port, debug=False)
 
 # =============== Main ===============
 def main():
     if not TOKEN:
         raise SystemExit("BOT_TOKEN not set.")
-    if not all([STRIPE_PUBLISHABLE_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, PUBLIC_BASE_URL]):
-        print("⚠️ Missing Stripe or PUBLIC_BASE_URL envs — payments won’t work until set.")
-
-    # Start webhook server
-    threading.Thread(target=_run_flask, daemon=True).start()
 
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -398,7 +288,6 @@ def main():
     app.add_handler(CommandHandler("viewexpenses", viewexpenses))
     app.add_handler(CommandHandler("generatebudget", generatebudget))
     app.add_handler(CommandHandler("exportexcel", exportexcel))
-    app.add_handler(CommandHandler("unlockfull", unlockfull))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
